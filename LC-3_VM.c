@@ -1,12 +1,10 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
-#include <signal.h>
-#include <stdbool.h>
-
+#include <stdint.h> // uint16_t
+#include <stdio.h>  // FILE
+#include <signal.h> // SIGINT
+/* windows only */
 #include <Windows.h>
 #include <conio.h>  // _kbhit
+#include <stdbool.h>
 
 HANDLE hStdin = INVALID_HANDLE_VALUE;
 
@@ -74,7 +72,35 @@ enum
     TRAP_HALT = 0x25   /* halt the program */
 };
 
-void mem_write(const uint16_t address, const uint16_t data);
+enum
+{
+    MR_KBSR = 0xFE00, /*Keyboard status register*/
+    MR_KBDR = 0xFE02 /*Keyboard data register*/
+};
+
+void mem_write(const uint16_t address, const uint16_t data)
+{
+    memory[address] = data;
+}
+
+uint16_t mem_read(const uint16_t address)
+{
+    //checking the status of keyboard
+    if(address == MR_KBSR)
+    {
+        if(check_key())
+        {
+            //setting status to active
+            memory[MR_KBSR] = (1 << 15);
+            memory[MR_KBDR] = getchar();
+        }
+        else
+        {
+            memory[MR_KBSR] = 0;
+        }
+    }
+    return memory[address];
+}
 
 void load_arguments(const int argc, const char* argv[])
 {
@@ -341,6 +367,40 @@ void trap_halt(bool* FETCH)
     puts("HALTING.");
     fflush(stdout);
     *FETCH = false;
+}
+
+uint16_t swap16(uint16_t x)
+{
+    return ((x << 8) | (x >> 8));
+}
+
+void read_image_file(FILE* file)
+{
+    /*The first 16bits in a LC-3 program specify the origin. Origin is the location where this program is loaded into memory.*/
+    uint16_t origin;
+    fread(&origin, sizeof(uint16_t), 1, file);
+    origin = swap16(origin);
+
+    uint16_t max_read = MEMORY_MAX - origin;
+    uint16_t* program = memory + origin;
+    //since we already know the maxsize of the program, we only need to call fread once.
+    uint16_t read = fread(program, sizeof(uint16_t), max_read, file);
+
+    //converting the Big-endian program to little-endian formater
+    while((read--) > 0)
+    {
+        *program = swap16(*program);
+        ++program;
+    }
+}
+
+int read_image(const char* image_path)
+{
+    FILE* file = fopen(image_path, "rb");
+    if (!file) { return 0; };
+    read_image_file(file);
+    fclose(file);
+    return 1;
 }
 
 int main(const int argc, const char* argv[])
