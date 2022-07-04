@@ -1,12 +1,17 @@
-#include <stdint.h> // uint16_t
-#include <stdio.h>  // FILE
-#include <signal.h> // SIGINT
-/* windows only */
-#include <Windows.h>
-#include <conio.h>  // _kbhit
-#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <signal.h>
+/* unix */
+#include <unistd.h>
+#include <fcntl.h>
 
-HANDLE hStdin = INVALID_HANDLE_VALUE;
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/termios.h>
+#include <sys/mman.h>
+#include <stdbool.h>
 
 /*LC-3 has 65,536 (2 ^16) addressable locations, each of size 16 bits. => Total memory = 65536 * 16 = 1048576 bits = 131072 bytes = 128 KB.*/
 
@@ -78,6 +83,40 @@ enum
     MR_KBDR = 0xFE02 /*Keyboard data register*/
 };
 
+uint16_t check_key()
+{
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(STDIN_FILENO, &readfds);
+
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    return select(1, &readfds, NULL, NULL, &timeout) != 0;
+}
+
+struct termios original_tio;
+
+void disable_input_buffering()
+{
+    tcgetattr(STDIN_FILENO, &original_tio);
+    struct termios new_tio = original_tio;
+    new_tio.c_lflag &= ~ICANON & ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_tio);
+}
+
+void restore_input_buffering()
+{
+    tcsetattr(STDIN_FILENO, TCSANOW, &original_tio);
+}
+
+void handle_interrupt(int signal)
+{
+    restore_input_buffering();
+    printf("\n");
+    exit(-2);
+}
+
 void mem_write(const uint16_t address, const uint16_t data)
 {
     memory[address] = data;
@@ -100,26 +139,6 @@ uint16_t mem_read(const uint16_t address)
         }
     }
     return memory[address];
-}
-
-void load_arguments(const int argc, const char* argv[])
-{
-    if(argc <  2)
-    {
-        printf("lc3 [image-file1] ...\n");
-        exit(2);
-    }
-    else
-    {
-        for(int i = 1; i < argc; ++i)
-        {
-            if (!read_image(argv[i]))
-            {
-                printf("failed to load image: %s\n", argv[i]);
-                exit(1);
-            }
-        }
-    }
 }
 
 //negative numbers are represented in 2s complement form.
@@ -209,7 +228,7 @@ void not(const uint16_t instruction)
     uint16_t destination_register = (instruction >> 9) & (0x7);
     uint16_t source_register = (instruction >> 6) & (0x7);
 
-    registers[destination_register] = !(registers[source_register]);
+    registers[destination_register] = ~(registers[source_register]);
 
     update_flags(destination_register);
 }
@@ -378,16 +397,16 @@ void read_image_file(FILE* file)
 {
     /*The first 16bits in a LC-3 program specify the origin. Origin is the location where this program is loaded into memory.*/
     uint16_t origin;
-    fread(&origin, sizeof(uint16_t), 1, file);
+    fread(&origin, sizeof(origin), 1, file);
     origin = swap16(origin);
 
     uint16_t max_read = MEMORY_MAX - origin;
     uint16_t* program = memory + origin;
     //since we already know the maxsize of the program, we only need to call fread once.
-    uint16_t read = fread(program, sizeof(uint16_t), max_read, file);
+    size_t read = fread(program, sizeof(uint16_t), max_read, file);
 
     //converting the Big-endian program to little-endian formater
-    while((read--) > 0)
+    while(read-- > 0)
     {
         *program = swap16(*program);
         ++program;
@@ -403,11 +422,33 @@ int read_image(const char* image_path)
     return 1;
 }
 
+void load_arguments(const int argc, const char* argv[])
+{
+    if(argc <  2)
+    {
+        printf("lc3 [image-file1] ...\n");
+        exit(2);
+    }
+    else
+    {
+        for(int i = 1; i < argc; ++i)
+        {
+            if (!read_image(argv[i]))
+            {
+                printf("failed to load image: %s\n", argv[i]);
+                exit(1);
+            }
+        }
+    }
+}
+
 int main(const int argc, const char* argv[])
 {
     //Load arguments i.e arguments given in the argument vector
     load_arguments(argc, argv);
-    //setup
+    
+    signal(SIGINT, handle_interrupt);
+    disable_input_buffering();
 
     registers[R_COND] = FL_ZRO; /*Condition flag set to zero by default.*/
 
@@ -499,5 +540,5 @@ int main(const int argc, const char* argv[])
                 break;
         }
     }
-
+    restore_input_buffering();
 }

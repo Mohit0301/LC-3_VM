@@ -54,3 +54,4 @@ dkms.conf
 #text file
 *.txt
 *.vscode
+*
