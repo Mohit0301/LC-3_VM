@@ -28,7 +28,7 @@ enum
     R_R4, 
     R_R5, 
     R_R6, 
-    R_7, /*General Purpose registers.*/
+    R_R7, /*General Purpose registers.*/
     R_PC, 
     R_COND,
     R_COUNT /*Total number of registers.*/
@@ -63,6 +63,18 @@ enum
     FL_ZRO = (1 << 1), /*ZERO*/
     FL_NEG = (1 << 2) /*NEGATIVE*/
 }ConditionFlags;
+
+enum
+{
+    TRAP_GETC = 0x20,  /* get character from keyboard, not echoed onto the terminal */
+    TRAP_OUT = 0x21,   /* output a character */
+    TRAP_PUTS = 0x22,  /* output a word string */
+    TRAP_IN = 0x23,    /* get character from keyboard, echoed onto the terminal */
+    TRAP_PUTSP = 0x24, /* output a byte string */
+    TRAP_HALT = 0x25   /* halt the program */
+};
+
+void mem_write(const uint16_t address, const uint16_t data);
 
 void load_arguments(const int argc, const char* argv[])
 {
@@ -166,6 +178,170 @@ void and(const uint16_t instruction)
     update_flags(destination_register);
 }
 
+void not(const uint16_t instruction)
+{
+    uint16_t destination_register = (instruction >> 9) & (0x7);
+    uint16_t source_register = (instruction >> 6) & (0x7);
+
+    registers[destination_register] = !(registers[source_register]);
+
+    update_flags(destination_register);
+}
+
+void branch(const uint16_t instruction)
+{
+    //find out which kind of branch. P, N, or Z
+    uint16_t flag = (instruction >> 9) & (0x7);
+    if(flag & registers[R_COND])
+    {
+        uint16_t pc_offset9 = sign_extend((instruction) & (0x1FF), 9);
+        registers[R_PC] += pc_offset9;
+    }
+}
+
+void jump(const uint16_t instruction)
+{
+    /*Also handles RET.*/
+    uint16_t base_register = (instruction >> 6) & (0x7);
+    registers[R_PC] = registers[base_register];
+}
+
+void jump_to_subroutine(const uint16_t instruction)
+{
+    //In LC-3, the return address is stored in the R7 register.
+    registers[R_R7] = registers[R_PC];
+
+    //Look at JSR instruction specification.
+    if((instruction >> 11) & (0x1))
+    {
+        uint16_t pc_offset11 = sign_extend((instruction) & (0x7FF), 11);
+        registers[R_PC] += pc_offset11;
+    }
+    else
+    {
+        uint16_t base_register = (instruction >> 6) & (0x7);
+        registers[R_PC] = registers[base_register];
+    }
+}
+
+void load(const uint16_t instruction)
+{
+    uint16_t base_register = (instruction >> 9) & (0x7);
+    uint16_t pc_offset9 = sign_extend(instruction & 0x1FF, 9);
+
+    registers[base_register] = mem_read(registers[R_PC] + pc_offset9);
+    
+    update_flags(base_register);
+}
+
+void load_register(const uint16_t instruction)
+{
+    uint16_t destination_register = (instruction >> 9) & (0x7);
+    uint16_t base_register = (instruction >> 6) & (0x7);
+
+    uint16_t br_offset6 = sign_extend(instruction & 0x3F, 6);
+
+    registers[destination_register] = mem_read(registers[base_register] + br_offset6);
+
+    update_flags(destination_register);
+}
+
+void load_effective(const uint16_t instruction)
+{
+    uint16_t destination_register = (instruction >> 9) & (0x7);
+    uint16_t pc_offset9 = sign_extend(instruction & 0x1FF, 9);
+
+    registers[destination_register] = registers[R_PC] + pc_offset9;
+
+    update_flags(destination_register);
+}
+
+void store(const uint16_t instruction)
+{
+    uint16_t source_register = (instruction >> 9) & (0x7);
+    uint16_t pc_offset9 = sign_extend(instruction & 0x1FF, 9);
+
+    mem_write(registers[R_PC] + pc_offset9, registers[source_register]);
+}
+
+void store_indirect(const uint16_t instruction)
+{
+    uint16_t source_register = (instruction >> 9) & (0x7);
+    uint16_t pc_offset9 = sign_extend(instruction & 0x1FF, 9);
+
+    mem_write(mem_read(registers[R_PC] + pc_offset9), registers[source_register]);
+}
+
+void store_register(const uint16_t instruction)
+{
+    uint16_t source_register = (instruction >> 9) & (0x7);
+    uint16_t base_register = (instruction >> 6) & (0x7);
+
+    uint16_t br_offset6 = sign_extend(instruction & 0X3F, 6);
+
+    mem_write(registers[base_register] + br_offset6, registers[source_register]);
+}
+
+void trap_puts()
+{
+    //address stores the address of the first character of the string.
+    uint16_t* address = memory + registers[R_R0];
+    //end of string is marked by 0xFFFF. Since characters are a byte in c, typecast is necessary.
+    while(*address)
+    {
+        putc((char)*address, stdout);
+        ++address;
+    }
+    fflush(stdout);
+}
+
+void trap_getc()
+{
+    //read character from keyboard into register R0.
+    registers[R_R0] = (uint16_t) getchar();
+    update_flags(R_R0);
+}
+
+void trap_out()
+{
+    putc((char)registers[R_R0], stdout);
+    fflush(stdout);
+}
+
+void trap_in()
+{
+    printf("Enter a character: ");
+    char c = getchar();
+    putc(c, stdout);
+    fflush(stdout);
+    registers[R_R0] = (uint16_t) c;
+    update_flags(R_R0);
+
+}
+
+void trap_putsp()
+{
+    /* one char per byte (two bytes per word)
+       here we need to swap back to
+       big endian format */
+    uint16_t* c = memory + registers[R_R0];
+    while (*c)
+    {
+        char char1 = (*c) & 0xFF;
+        putc(char1, stdout);
+        char char2 = (*c) >> 8;
+        if (char2) putc(char2, stdout);
+        ++c;
+    }
+    fflush(stdout);
+}
+
+void trap_halt(bool* FETCH)
+{
+    puts("HALTING.");
+    fflush(stdout);
+    *FETCH = false;
+}
 
 int main(const int argc, const char* argv[])
 {
@@ -195,40 +371,64 @@ int main(const int argc, const char* argv[])
                 and(instruction);
                 break;
             case OP_NOT:
-                //{NOT}
+                not(instruction);
                 break;
             case OP_BR:
-                //{BR}
+                branch(instruction);
                 break;
             case OP_JMP:
-                //{JMP}
+                jump(instruction);
                 break;
             case OP_JSR:
-                //{JSR}
+                jump_to_subroutine(instruction);
                 break;
             case OP_LD:
-                //{LD}
+                load(instruction);
                 break;
             case OP_LDI:
                 ldi(instruction);
                 break;
             case OP_LDR:
-                //{LDR}
+                load_register(instruction);
                 break;
             case OP_LEA:
-                //{LEA}
+                load_effective(instruction);
                 break;
             case OP_ST:
-                //{ST}
+                store(instruction);
                 break;
             case OP_STI:
-                //{STI}
+                store_indirect(instruction);
                 break;
             case OP_STR:
-                //{STR}
+                store_register(instruction);
                 break;
             case OP_TRAP:
-                //{TRAP}
+                {
+                    //On LC-3, the return address is stored on register R7.
+                    registers[R_R7] = registers[R_PC];
+                    switch (instruction & 0xFF)
+                    {
+                        case TRAP_GETC:
+                            trap_getc();
+                            break;
+                        case TRAP_OUT:
+                            trap_out();
+                            break;
+                        case TRAP_PUTS:
+                            trap_puts();
+                            break;
+                        case TRAP_IN:
+                            trap_in();
+                            break;
+                        case TRAP_PUTSP:
+                            trap_putsp();
+                            break;
+                        case TRAP_HALT:
+                            trap_halt(&FETCH);
+                            break;
+                    }
+                }
                 break;
             case OP_RES:
             case OP_RTI:
