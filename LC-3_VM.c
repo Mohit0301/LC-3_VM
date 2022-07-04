@@ -78,6 +78,11 @@ enum
     MR_KBDR = 0xFE02 /*Keyboard data register*/
 };
 
+uint16_t check_key()
+{
+    return WaitForSingleObject(hStdin, 1000) == WAIT_OBJECT_0 && _kbhit();
+}
+
 void mem_write(const uint16_t address, const uint16_t data)
 {
     memory[address] = data;
@@ -100,26 +105,6 @@ uint16_t mem_read(const uint16_t address)
         }
     }
     return memory[address];
-}
-
-void load_arguments(const int argc, const char* argv[])
-{
-    if(argc <  2)
-    {
-        printf("lc3 [image-file1] ...\n");
-        exit(2);
-    }
-    else
-    {
-        for(int i = 1; i < argc; ++i)
-        {
-            if (!read_image(argv[i]))
-            {
-                printf("failed to load image: %s\n", argv[i]);
-                exit(1);
-            }
-        }
-    }
 }
 
 //negative numbers are represented in 2s complement form.
@@ -209,7 +194,7 @@ void not(const uint16_t instruction)
     uint16_t destination_register = (instruction >> 9) & (0x7);
     uint16_t source_register = (instruction >> 6) & (0x7);
 
-    registers[destination_register] = !(registers[source_register]);
+    registers[destination_register] = ~(registers[source_register]);
 
     update_flags(destination_register);
 }
@@ -384,7 +369,7 @@ void read_image_file(FILE* file)
     uint16_t max_read = MEMORY_MAX - origin;
     uint16_t* program = memory + origin;
     //since we already know the maxsize of the program, we only need to call fread once.
-    uint16_t read = fread(program, sizeof(uint16_t), max_read, file);
+    size_t read = fread(program, sizeof(uint16_t), max_read, file);
 
     //converting the Big-endian program to little-endian formater
     while((read--) > 0)
@@ -403,11 +388,58 @@ int read_image(const char* image_path)
     return 1;
 }
 
+DWORD fdwMode, fdwOldMode;
+
+void disable_input_buffering()
+{
+    hStdin = GetStdHandle(STD_INPUT_HANDLE);
+    GetConsoleMode(hStdin, &fdwOldMode); /* save old mode */
+    fdwMode = fdwOldMode
+            ^ ENABLE_ECHO_INPUT  /* no input echo */
+            ^ ENABLE_LINE_INPUT; /* return when one or
+                                    more characters are available */
+    SetConsoleMode(hStdin, fdwMode); /* set new mode */
+    FlushConsoleInputBuffer(hStdin); /* clear buffer */
+}
+
+void restore_input_buffering()
+{
+    SetConsoleMode(hStdin, fdwOldMode);
+}
+void handle_interrupt(int signal)
+{
+    restore_input_buffering();
+    printf("\n");
+    exit(-2);
+}
+
+void load_arguments(const int argc, const char* argv[])
+{
+    if(argc <  2)
+    {
+        printf("lc3 [image-file1] ...\n");
+        exit(2);
+    }
+    else
+    {
+        for(int i = 1; i < argc; ++i)
+        {
+            if (!read_image(argv[i]))
+            {
+                printf("failed to load image: %s\n", argv[i]);
+                exit(1);
+            }
+        }
+    }
+}
+
 int main(const int argc, const char* argv[])
 {
     //Load arguments i.e arguments given in the argument vector
     load_arguments(argc, argv);
     //setup
+    signal(SIGINT, handle_interrupt);
+    disable_input_buffering();
 
     registers[R_COND] = FL_ZRO; /*Condition flag set to zero by default.*/
 
@@ -499,5 +531,5 @@ int main(const int argc, const char* argv[])
                 break;
         }
     }
-
+    restore_input_buffering();
 }
